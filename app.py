@@ -12,8 +12,7 @@ from shapely.ops import unary_union
 # ── INNSTILLINGER ─────────────────────────────────────────────
 st.set_page_config(page_title="Kraftfordeling", layout="wide")
 
-DATAMAPPE = Path(__file__).resolve().parent / "data"
-CRS = "EPSG:25832"
+DATAMAPPE = Path(__file__).resolve().parent
 
 
 # ── HJELPEFUNKSJONER ──────────────────────────────────────────
