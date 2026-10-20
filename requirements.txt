@@ -1,0 +1,6 @@
+streamlit>=1.44
+geopandas>=1.0
+pandas>=2.2
+pyogrio>=0.10
+shapely>=2.1
+openpyxl>=3.1
