@@ -12,7 +12,16 @@ from shapely.ops import unary_union
 # ── INNSTILLINGER ─────────────────────────────────────────────
 st.set_page_config(page_title="Kraftfordeling", layout="wide")
 
+# Bakgrunnsfilene ligger sammen med app.py.
 DATAMAPPE = Path(__file__).resolve().parent
+
+# Alle arealer beregnes i UTM 32.
+CRS = "EPSG:25832"
+
+# Brukes bare hvis koordinatsystem mangler i filen.
+PROSJEKT_CRS = "EPSG:25833"
+KOMMUNE_CRS = "EPSG:25833"
+KRAFT_CRS = "EPSG:25832"
 
 
 # ── HJELPEFUNKSJONER ──────────────────────────────────────────
@@ -50,15 +59,19 @@ def polygoner(geometri):
 
     for delgeometri in getattr(geometri, "geoms", []):
         polygon = polygoner(delgeometri)
+
         if not polygon.is_empty:
             deler.append(polygon)
 
     return unary_union(deler) if deler else Polygon()
 
 
-def klargjor(data):
+def klargjor(data, standard_crs=None):
     if data.crs is None:
-        raise ValueError("Laget mangler koordinatsystem.")
+        if standard_crs is None:
+            raise ValueError("Laget mangler koordinatsystem.")
+
+        data = data.set_crs(standard_crs)
 
     if data.geometry.isna().any():
         raise ValueError(
@@ -120,7 +133,10 @@ def les_bakgrunn():
                 + lag.to_string(index=False)
             )
 
-    kommuner = klargjor(les(kommunefil, kommunelag))
+    kommuner = klargjor(
+        les(kommunefil, kommunelag),
+        KOMMUNE_CRS,
+    )
 
     nummerfelt = finn_felt(
         kommuner,
@@ -155,7 +171,9 @@ def les_bakgrunn():
     if not kommuner["Kommunenummer"].str.fullmatch(
         r"\d{4}", na=False
     ).all():
-        raise ValueError("Kommunelaget har ugyldige kommunenummer.")
+        raise ValueError(
+            "Kommunelaget har ugyldige kommunenummer."
+        )
 
     kommuner["Kommune"] = (
         kommuner[navnefelt].astype("string").str.strip()
@@ -175,7 +193,11 @@ def les_bakgrunn():
         as_index=False,
     )
 
-    kraft = klargjor(les(kraftfil))
+    kraft = klargjor(
+        les(kraftfil),
+        KRAFT_CRS,
+    )
+
     eierfelt = finn_felt(kraft, ["eierNavn"])
 
     kraft["Nettselskap"] = (
@@ -197,10 +219,12 @@ def les_bakgrunn():
 
 
 def beregn(prosjekt, kommuner, kraft, minste_areal):
-    prosjekt = klargjor(prosjekt)
+    prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
 
     if prosjekt.empty:
-        raise ValueError("Prosjektlaget inneholder ingen polygonarealer.")
+        raise ValueError(
+            "Prosjektlaget inneholder ingen polygonarealer."
+        )
 
     prosjektgeometri = prosjekt.geometry.union_all()
     xmin, ymin, xmax, ymax = prosjekt.total_bounds
@@ -218,7 +242,8 @@ def beregn(prosjekt, kommuner, kraft, minste_areal):
     if kommuner.empty:
         raise ValueError(
             "Prosjektet overlapper ingen kommuner. "
-            "Kontroller koordinatsystemet."
+            "Kontroller at koordinatsystemene øverst i koden "
+            "stemmer med filene."
         )
 
     uten_kommune = prosjektgeometri.difference(
@@ -252,7 +277,10 @@ def beregn(prosjekt, kommuner, kraft, minste_areal):
         sum_konsesjonsareal = 0
 
         def legg_til(navn, areal):
-            if areal <= 0 or areal < minste_areal * 1_000_000:
+            if areal <= 0:
+                return
+
+            if areal < minste_areal * 1_000_000:
                 return
 
             rader.append({
@@ -313,6 +341,7 @@ def beregn(prosjekt, kommuner, kraft, minste_areal):
 
 # ── NETTSIDEN ─────────────────────────────────────────────────
 st.title("Kraftfordeling")
+
 st.write(
     "Last opp prosjektområdet for å beregne areal "
     "og prosentvis fordeling per kommune og nettselskap."
@@ -340,7 +369,9 @@ if opplastet is not None:
             ]
 
             if polygonlag.empty:
-                st.error("Filen inneholder ingen gjenkjente polygonlag.")
+                st.error(
+                    "Filen inneholder ingen gjenkjente polygonlag."
+                )
                 st.stop()
 
             lagnavn = polygonlag["name"].tolist()
@@ -348,7 +379,9 @@ if opplastet is not None:
             aktuelle = [
                 navn for navn in lagnavn
                 if normaliser(navn) not in [
-                    "kommune", "kommuner", "kommunegrense"
+                    "kommune",
+                    "kommuner",
+                    "kommunegrense",
                 ]
             ]
 
@@ -365,31 +398,6 @@ if opplastet is not None:
             )
 
             prosjekt = les(prosjektfil, valgt_lag)
-
-            if prosjekt.crs is None:
-                valgt_crs = st.selectbox(
-                    "Filen mangler koordinatsystem. "
-                    "Velg systemet koordinatene er lagret i:",
-                    [
-                        "Velg koordinatsystem",
-                        "EPSG:25832",
-                        "EPSG:25833",
-                        "EPSG:25835",
-                        "EPSG:4326",
-                    ],
-                )
-
-                if valgt_crs == "Velg koordinatsystem":
-                    st.info(
-                        "Velg koordinatsystem for å fortsette."
-                    )
-                    st.stop()
-
-                prosjekt = prosjekt.set_crs(valgt_crs)
-            else:
-                st.caption(
-                    f"Koordinatsystem: {prosjekt.crs}"
-                )
 
             minste_areal = st.number_input(
                 "Minste areal som skal vises (km²)",
@@ -429,7 +437,8 @@ if opplastet is not None:
                     excel = BytesIO()
 
                     with pd.ExcelWriter(
-                        excel, engine="openpyxl"
+                        excel,
+                        engine="openpyxl",
                     ) as writer:
                         tabell.to_excel(
                             writer,
