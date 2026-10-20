@@ -94,6 +94,7 @@ def les_bakgrunn():
             raise FileNotFoundError(f"Fant ikke {fil}")
 
     lag = gpd.list_layers(kommunefil)
+
     kommunelag = next(
         (
             navn for navn in lag["name"]
@@ -103,21 +104,21 @@ def les_bakgrunn():
     )
 
     if kommunelag is None:
-    polygonlag = lag[
-        lag["geometry_type"].str.contains(
-            r"Polygon|Surface",
-            case=False,
-            na=False,
-        )
-    ]
+        polygonlag = lag[
+            lag["geometry_type"].str.contains(
+                r"Polygon|Surface",
+                case=False,
+                na=False,
+            )
+        ]
 
-    if len(polygonlag) == 1:
-        kommunelag = polygonlag.iloc[0]["name"]
-    else:
-        raise ValueError(
-            "Kunne ikke velge kommunelag automatisk.\n"
-            + lag.to_string(index=False)
-        )
+        if len(polygonlag) == 1:
+            kommunelag = polygonlag.iloc[0]["name"]
+        else:
+            raise ValueError(
+                "Kunne ikke velge kommunelag automatisk.\n"
+                + lag.to_string(index=False)
+            )
 
     kommuner = klargjor(les(kommunefil, kommunelag))
 
