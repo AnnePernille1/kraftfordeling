@@ -103,8 +103,20 @@ def les_bakgrunn():
     )
 
     if kommunelag is None:
+    polygonlag = lag[
+        lag["geometry_type"].str.contains(
+            r"Polygon|Surface",
+            case=False,
+            na=False,
+        )
+    ]
+
+    if len(polygonlag) == 1:
+        kommunelag = polygonlag.iloc[0]["name"]
+    else:
         raise ValueError(
-            "Fant ikke laget Kommune i Kommuner.gml."
+            "Kunne ikke velge kommunelag automatisk.\n"
+            + lag.to_string(index=False)
         )
 
     kommuner = klargjor(les(kommunefil, kommunelag))
