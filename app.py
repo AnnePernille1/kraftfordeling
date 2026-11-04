@@ -353,7 +353,9 @@ def informasjonskategori(verdi):
     for tiltak in ("Ajourføring", "Nykonstruksjon"):
         for gsd, standard in (("7", "A"), ("10", "B")):
             if nokkel == normaliser(tiltak) + "gsd" + gsd:
-                return f"{tiltak} FKB-{standard}"
+                # Korrigeringen gjelder bare FKB-A i dette grunnlaget.
+                vist_tiltak = "Ajourføring" if standard == "A" else tiltak
+                return f"{vist_tiltak} FKB-{standard}"
     return tekst
 
 
@@ -420,20 +422,49 @@ def med_sum(tabell):
         ])
     forst = [c for c in rekkefolge if c in tabell.columns]
     tabell = tabell[forst + [c for c in tabell.columns if c not in forst]]
-    # Fjern arealkolonner uten positive arealer i noen av de viste kommunene.
-    tomme = [c for c in tabell.columns
-             if c.endswith(" km²") and tabell[c].fillna(0).eq(0).all()]
-    tabell = tabell.drop(columns=tomme)
+    # Fjern både areal- og prosentkolonner uten utslag.
+    tallfelt = [c for c in tabell if c.endswith((" km²", " %"))]
+    tabell = tabell.drop(columns=[c for c in tallfelt if tabell[c].fillna(0).eq(0).all()])
     if tabell.empty:
         return tabell
     summer = {c: tabell[c].sum() if c.endswith(" km²") else "" for c in tabell}
+    vekter = tabell["Prosjektområde km²"]
+    for c in tabell:
+        if c.endswith(" %"):
+            summer[c] = (tabell[c] * vekter).sum() / vekter.sum() if vekter.sum() else 0.0
     summer["Kommune"] = "SUM"
     return pd.concat([tabell, pd.DataFrame([summer])], ignore_index=True)
+
+
+def banenor_andeler(prosjekt, kommuner, buffer):
+    # Bufferfilen er allerede bufret. Ikke legg på ytterligere 100 meter.
+    prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
+    buffer = klargjor(buffer, "EPSG:25833")
+    samlet = prosjekt.geometry.union_all()
+    utsnitt = kommuner[kommuner.intersects(samlet)].copy()
+    utsnitt.geometry = utsnitt.geometry.intersection(samlet)
+    utsnitt = utsnitt[utsnitt.geometry.area > 0].copy()
+    banegeom = buffer.geometry.union_all()
+    utsnitt["Bane NOR %"] = 100 * utsnitt.geometry.intersection(banegeom).area / utsnitt.geometry.area
+    return utsnitt[["Kommunenummer", "Bane NOR %"]]
 
 
 # ── NETTSIDEN ─────────────────────────────────────────────────
 st.title("Areal- og kraftfordeling")
 st.write("Beregn areal per kommune, egenskapskategori, fylkeskommune og nettselskap.")
+banefil = DATAMAPPE / "forenklet, bufret.gml"
+banebuffer = None
+if banefil.is_file():
+    banebuffer = les(banefil)
+else:
+    baneopplastet = st.file_uploader("Bane NOR – ferdig 100-metersbuffer", type=["gml", "gpkg", "geojson"])
+    if baneopplastet is not None:
+        with TemporaryDirectory() as banetemp:
+            lokal_bane = Path(banetemp) / Path(baneopplastet.name).name
+            lokal_bane.write_bytes(baneopplastet.getvalue())
+            banebuffer = les(lokal_bane)
+    else:
+        st.info("Last opp den ferdige bufferfilen for å få med Bane NOR i prosentfordelingen.")
 opplastet = st.file_uploader("Velg prosjektområde", type=["gml", "gpkg", "geojson"])
 if opplastet is not None:
     try:
@@ -472,20 +503,26 @@ if opplastet is not None:
                     oversikt = arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal)
                     detalj, advarsler = beregn_kraft(prosjekt, kommuner, kraft, minste_areal)
                     if not detalj.empty:
-                        nett = detalj.pivot_table(index="Kommunenummer", columns="Nettselskap", values="Konsesjonsareal km²", aggfunc="sum", fill_value=0)
-                        nett.columns = [f"Nett: {c} km²" for c in nett.columns]
+                        nett = detalj.pivot_table(index="Kommunenummer", columns="Nettselskap", values="Andel %", aggfunc="sum", fill_value=0)
+                        nett.columns = [f"Nett: {c} %" for c in nett.columns]
                         oversikt = oversikt.merge(nett, on="Kommunenummer", how="left")
                         for c in nett.columns:
                             oversikt[c] = oversikt[c].fillna(0)
+                    if banebuffer is not None:
+                        bane = banenor_andeler(prosjekt, kommuner, banebuffer)
+                        oversikt = oversikt.merge(bane, on="Kommunenummer", how="left")
+                        oversikt["Bane NOR %"] = oversikt["Bane NOR %"].fillna(0)
                     oversikt = med_sum(oversikt)
                 for melding in advarsler:
                     st.warning(melding)
                 if oversikt.empty:
                     st.info("Ingen kommuner oppfyller arealgrensen.")
                 else:
-                    st.subheader("Arealfordeling per kommune (km²)")
-                    st.dataframe(oversikt.style.format({c: "{:.3f}" for c in oversikt if c.endswith(" km²")}), hide_index=True, use_container_width=True)
+                    st.subheader("Areal og prosentfordeling per kommune")
+                    st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.3f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
                     st.caption("SUM gjelder de viste radene. Kategorier fra ulike felt kan dekke samme areal og skal ikke summeres på tvers av kolonner. 0,000 kan være et lite positivt areal; Excel inneholder full presisjon.")
+                    st.caption("Bane NOR og e-verk vises som prosent av hele prosjektarealet i kommunen. Områdene kan overlappe, så prosentene kan samlet overstige 100 %. SUM viser arealvektet prosent for de viste kommunene.")
+                    detalj = detalj[["Kommunenummer", "Kommune", "Nettselskap", "Andel %"]]
                     with st.expander("Kraftfordeling med prosentandeler"):
                         st.dataframe(detalj, hide_index=True)
                     excel = BytesIO()
@@ -499,7 +536,7 @@ if opplastet is not None:
                                 ark.column_dimensions[kol[0].column_letter].width = min(45, max(14, len(str(kol[0].value)) + 2))
                                 for celle in kol[1:]:
                                     if isinstance(celle.value, (float, int)):
-                                        celle.number_format = "0.000000"
+                                        celle.number_format = '0.00" %"' if str(kol[0].value).endswith(" %") else "0.000000"
                     st.download_button("Last ned Excel", data=excel.getvalue(), file_name="arealfordeling.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore")
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
