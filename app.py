@@ -406,6 +406,20 @@ def arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal):
 
 
 def med_sum(tabell):
+    tabell = tabell.rename(columns={
+        "Prosjektareal km²": "Prosjektområde km²",
+        **{f"FKB-{standard} km²": f"Totalt areal FKB-{standard} km²"
+           for standard in "ABCD"},
+    })
+    rekkefolge = ["Kommunenummer", "Kommune", "Prosjektområde km²"]
+    for standard in "ABCD":
+        rekkefolge.extend([
+            f"Ajourføring FKB-{standard} km²",
+            f"Nykonstruksjon FKB-{standard} km²",
+            f"Totalt areal FKB-{standard} km²",
+        ])
+    forst = [c for c in rekkefolge if c in tabell.columns]
+    tabell = tabell[forst + [c for c in tabell.columns if c not in forst]]
     # Fjern arealkolonner uten positive arealer i noen av de viste kommunene.
     tomme = [c for c in tabell.columns
              if c.endswith(" km²") and tabell[c].fillna(0).eq(0).all()]
