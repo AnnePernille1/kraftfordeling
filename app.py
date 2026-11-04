@@ -346,6 +346,17 @@ FYLKER = {
 }
 
 
+def informasjonskategori(verdi):
+    # Samle skrivevarianten GDS med GSD før union og arealberegning.
+    tekst = " ".join(str(verdi).split())
+    nokkel = normaliser(tekst).replace("gds", "gsd")
+    for tiltak in ("Ajourføring", "Nykonstruksjon"):
+        for gsd, standard in (("7", "A"), ("10", "B")):
+            if nokkel == normaliser(tiltak) + "gsd" + gsd:
+                return f"{tiltak} FKB-{standard}"
+    return tekst
+
+
 def arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal):
     prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
     if prosjekt.empty:
@@ -366,11 +377,14 @@ def arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal):
     for kolonne in felt:
         verdier = prosjekt[kolonne].astype("string").str.strip().fillna("")
         verdier = verdier.replace("", "Ikke angitt")
+        if normaliser(kolonne) == "informasjon":
+            verdier = verdier.map(informasjonskategori)
         kategorier = sorted(verdier.unique())
         if normaliser(kolonne) == "fkbstandard":
             kategorier = sorted(set(kategorier) | {"A", "B", "C", "D"})
         for verdi in kategorier:
             navn = (f"FKB-{verdi} km²" if normaliser(kolonne) == "fkbstandard"
+                    else f"{verdi} km²" if normaliser(kolonne) == "informasjon"
                     else f"{kolonne}: {verdi} km²")
             geometrier = prosjekt.loc[verdier.eq(verdi)].geometry
             geom = geometrier.union_all() if len(geometrier) else Polygon()
@@ -392,6 +406,10 @@ def arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal):
 
 
 def med_sum(tabell):
+    # Fjern arealkolonner uten positive arealer i noen av de viste kommunene.
+    tomme = [c for c in tabell.columns
+             if c.endswith(" km²") and tabell[c].fillna(0).eq(0).all()]
+    tabell = tabell.drop(columns=tomme)
     if tabell.empty:
         return tabell
     summer = {c: tabell[c].sum() if c.endswith(" km²") else "" for c in tabell}
@@ -472,3 +490,4 @@ if opplastet is not None:
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
 st.caption("Arealer beregnes fra geometrien i UTM 32. Bakgrunnsfiler oppdateres ikke automatisk.")
+
