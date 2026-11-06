@@ -477,7 +477,7 @@ def nyeveier_andeler(prosjekt, kommuner, veilinjer):
         raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
     veilinjer = veilinjer.loc[gyldige].copy()
     # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
-    veilinjer.geometry = veilinjer.geometry.buffer(100)
+    veilinjer.geometry = veilinjer.geometry.buffer(250)
     return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
         columns={"Bane NOR %": "Nye Veier %"}
     )
