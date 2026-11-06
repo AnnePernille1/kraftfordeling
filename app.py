@@ -17,8 +17,7 @@ st.set_page_config(page_title="Kraftfordeling", layout="wide")
 # Bakgrunnsfilene ligger sammen med app.py.
 DATAMAPPE = Path(__file__).resolve().parent
 
-# Alle arealer beregnes i UTM 32.
-CRS = "EPSG:25832"
+# Beregningssonen velges automatisk fra prosjektområdet (ETRS89 / UTM).
 
 # Brukes bare hvis koordinatsystem mangler i filen.
 PROSJEKT_CRS = "EPSG:25833"
@@ -68,7 +67,21 @@ def polygoner(geometri):
     return unary_union(deler) if deler else Polygon()
 
 
-def klargjor(data, standard_crs=None):
+def velg_utm(prosjekt):
+    if prosjekt.empty:
+        raise ValueError("Prosjektlaget er tomt.")
+    # Kildens CRS må være kjent; det kan ikke gjettes fra plasseringen.
+    if prosjekt.crs is None:
+        prosjekt = prosjekt.set_crs(PROSJEKT_CRS)
+    valgt = prosjekt.estimate_utm_crs(datum_name="ETRS89")
+    if valgt is None:
+        raise ValueError("Kunne ikke bestemme UTM-sone for prosjektområdet.")
+    # Bruk ETRS89 / UTM med øst/nord-akse (EPSG:258xx).
+    sone = int(valgt.utm_zone[:-1])
+    return f"EPSG:{25800 + sone}"
+
+
+def klargjor(data, standard_crs=None, beregnings_crs=None):
     if data.crs is None:
         if standard_crs is None:
             raise ValueError("Laget mangler koordinatsystem.")
@@ -81,7 +94,7 @@ def klargjor(data, standard_crs=None):
             "Kontroller filen i QGIS."
         )
 
-    data = data.to_crs(CRS).copy()
+    data = data.to_crs(beregnings_crs or data.crs).copy()
     data.geometry = data.geometry.make_valid().map(polygoner)
 
     return data[
@@ -100,7 +113,7 @@ def les(fil, lag=None):
 
 
 @st.cache_data
-def les_bakgrunn():
+def les_bakgrunn(beregnings_crs):
     kommunefil = DATAMAPPE / "Kommuner.gml"
     kraftfil = DATAMAPPE / "NettKonsesjonsomrade.shp"
 
@@ -138,6 +151,7 @@ def les_bakgrunn():
     kommuner = klargjor(
         les(kommunefil, kommunelag),
         KOMMUNE_CRS,
+        beregnings_crs,
     )
 
     nummerfelt = finn_felt(
@@ -198,6 +212,7 @@ def les_bakgrunn():
     kraft = klargjor(
         les(kraftfil),
         KRAFT_CRS,
+        beregnings_crs,
     )
 
     eierfelt = finn_felt(kraft, ["eierNavn"])
@@ -221,7 +236,7 @@ def les_bakgrunn():
 
 
 def beregn_kraft(prosjekt, kommuner, kraft, minste_areal):
-    prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
+    prosjekt = klargjor(prosjekt, PROSJEKT_CRS, kommuner.crs)
 
     if prosjekt.empty:
         raise ValueError(
@@ -360,7 +375,7 @@ def informasjonskategori(verdi):
 
 
 def arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal):
-    prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
+    prosjekt = klargjor(prosjekt, PROSJEKT_CRS, kommuner.crs)
     if prosjekt.empty:
         raise ValueError("Prosjektlaget inneholder ingen polygonarealer.")
     samlet = prosjekt.geometry.union_all()
@@ -438,8 +453,8 @@ def med_sum(tabell):
 
 def banenor_andeler(prosjekt, kommuner, buffer):
     # Bufferfilen er allerede bufret. Ikke legg på ytterligere 100 meter.
-    prosjekt = klargjor(prosjekt, PROSJEKT_CRS)
-    buffer = klargjor(buffer, "EPSG:25833")
+    prosjekt = klargjor(prosjekt, PROSJEKT_CRS, kommuner.crs)
+    buffer = klargjor(buffer, "EPSG:25833", kommuner.crs)
     samlet = prosjekt.geometry.union_all()
     utsnitt = kommuner[kommuner.intersects(samlet)].copy()
     utsnitt.geometry = utsnitt.geometry.intersection(samlet)
@@ -454,7 +469,7 @@ def nyeveier_andeler(prosjekt, kommuner, veilinjer):
     veilinjer = veilinjer.copy()
     if veilinjer.crs is None:
         veilinjer = veilinjer.set_crs("EPSG:25833")
-    veilinjer = veilinjer.to_crs(CRS)
+    veilinjer = veilinjer.to_crs(kommuner.crs)
     gyldige = veilinjer.geometry.notna() & ~veilinjer.geometry.is_empty
     if not veilinjer.loc[gyldige].geometry.geom_type.isin(
         ["LineString", "MultiLineString"]
@@ -462,7 +477,7 @@ def nyeveier_andeler(prosjekt, kommuner, veilinjer):
         raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
     veilinjer = veilinjer.loc[gyldige].copy()
     # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
-    veilinjer.geometry = veilinjer.geometry.buffer(250)
+    veilinjer.geometry = veilinjer.geometry.buffer(100)
     return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
         columns={"Bane NOR %": "Nye Veier %"}
     )
@@ -524,8 +539,9 @@ if opplastet is not None:
             standardfelt = [c for c in egenskaper if normaliser(c) in
                            ["fkbstandard", "informasjon", "punkttetthet", "laserpunkt", "laserunkttetthet"]]
             felt = standardfelt
-            kommuner, kraft = les_bakgrunn()
-            prosjektklar = klargjor(prosjekt, PROSJEKT_CRS)
+            beregnings_crs = velg_utm(prosjekt)
+            kommuner, kraft = les_bakgrunn(beregnings_crs)
+            prosjektklar = klargjor(prosjekt, PROSJEKT_CRS, beregnings_crs)
             if prosjektklar.empty:
                 raise ValueError("Prosjektlaget inneholder ingen polygonarealer.")
             aktuelle = kommuner[kommuner.intersects(prosjektklar.geometry.union_all())]
@@ -574,5 +590,6 @@ if opplastet is not None:
                     st.download_button("Last ned Excel", data=excel.getvalue(), file_name="arealfordeling.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore")
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
-st.caption("Arealer beregnes fra geometrien i UTM 32. Bakgrunnsfiler oppdateres ikke automatisk.")
+st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet. Bakgrunnsfiler oppdateres ikke automatisk.")
+
 
