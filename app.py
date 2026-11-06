@@ -449,6 +449,25 @@ def banenor_andeler(prosjekt, kommuner, buffer):
     return utsnitt[["Kommunenummer", "Bane NOR %"]]
 
 
+def nyeveier_andeler(prosjekt, kommuner, veilinjer):
+    # Nye Veier-filen inneholder linjer uten buffer.
+    veilinjer = veilinjer.copy()
+    if veilinjer.crs is None:
+        veilinjer = veilinjer.set_crs("EPSG:25833")
+    veilinjer = veilinjer.to_crs(CRS)
+    gyldige = veilinjer.geometry.notna() & ~veilinjer.geometry.is_empty
+    if not veilinjer.loc[gyldige].geometry.geom_type.isin(
+        ["LineString", "MultiLineString"]
+    ).all():
+        raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
+    veilinjer = veilinjer.loc[gyldige].copy()
+    # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
+    veilinjer.geometry = veilinjer.geometry.buffer(100)
+    return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
+        columns={"Bane NOR %": "Nye Veier %"}
+    )
+
+
 # ── NETTSIDEN ─────────────────────────────────────────────────
 st.title("Areal- og kraftfordeling")
 st.write("Beregn areal per kommune, egenskapskategori, fylkeskommune og nettselskap.")
@@ -465,6 +484,20 @@ else:
             banebuffer = les(lokal_bane)
     else:
         st.info("Last opp den ferdige bufferfilen for å få med Bane NOR i prosentfordelingen.")
+veifil = DATAMAPPE / "NyeVeier_strekninger.geojson"
+veilinjer = None
+if veifil.is_file():
+    veilinjer = les(veifil)
+else:
+    veiopplastet = st.file_uploader("Nye Veier – veilinjer uten buffer", type=["geojson", "gml", "gpkg"])
+    if veiopplastet is not None:
+        with TemporaryDirectory() as veitemp:
+            lokal_vei = Path(veitemp) / Path(veiopplastet.name).name
+            lokal_vei.write_bytes(veiopplastet.getvalue())
+            veilinjer = les(lokal_vei)
+    else:
+        st.info("Last opp veilinjer for å få med Nye Veier i prosentfordelingen.")
+st.caption("Bane NOR: bruker ferdig buffer. Nye Veier: legger på 100 meter på hver side av linjene.")
 opplastet = st.file_uploader("Velg prosjektområde", type=["gml", "gpkg", "geojson"])
 if opplastet is not None:
     try:
@@ -512,6 +545,10 @@ if opplastet is not None:
                         bane = banenor_andeler(prosjekt, kommuner, banebuffer)
                         oversikt = oversikt.merge(bane, on="Kommunenummer", how="left")
                         oversikt["Bane NOR %"] = oversikt["Bane NOR %"].fillna(0)
+                    if veilinjer is not None:
+                        vei = nyeveier_andeler(prosjekt, kommuner, veilinjer)
+                        oversikt = oversikt.merge(vei, on="Kommunenummer", how="left")
+                        oversikt["Nye Veier %"] = oversikt["Nye Veier %"].fillna(0)
                     oversikt = med_sum(oversikt)
                 for melding in advarsler:
                     st.warning(melding)
@@ -521,7 +558,7 @@ if opplastet is not None:
                     st.subheader("Areal og prosentfordeling per kommune")
                     st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.3f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
                     st.caption("SUM gjelder de viste radene. Kategorier fra ulike felt kan dekke samme areal og skal ikke summeres på tvers av kolonner. 0,000 kan være et lite positivt areal; Excel inneholder full presisjon.")
-                    st.caption("Bane NOR og e-verk vises som prosent av hele prosjektarealet i kommunen. Områdene kan overlappe, så prosentene kan samlet overstige 100 %. SUM viser arealvektet prosent for de viste kommunene.")
+                    st.caption("Bane NOR, Nye Veier og e-verk vises som prosent av hele prosjektarealet i kommunen. Områdene kan overlappe, så prosentene kan samlet overstige 100 %. SUM viser arealvektet prosent for de viste kommunene.")
                     detalj = detalj[["Kommunenummer", "Kommune", "Nettselskap", "Andel %"]]
                     with st.expander("Kraftfordeling med prosentandeler"):
                         st.dataframe(detalj, hide_index=True)
@@ -541,4 +578,3 @@ if opplastet is not None:
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
 st.caption("Arealer beregnes fra geometrien i UTM 32. Bakgrunnsfiler oppdateres ikke automatisk.")
-
