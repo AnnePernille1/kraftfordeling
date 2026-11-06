@@ -462,7 +462,7 @@ def nyeveier_andeler(prosjekt, kommuner, veilinjer):
         raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
     veilinjer = veilinjer.loc[gyldige].copy()
     # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
-    veilinjer.geometry = veilinjer.geometry.buffer(100)
+    veilinjer.geometry = veilinjer.geometry.buffer(250)
     return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
         columns={"Bane NOR %": "Nye Veier %"}
     )
@@ -510,16 +510,20 @@ if opplastet is not None:
                 st.error("Filen inneholder ingen gjenkjente polygonlag.")
                 st.stop()
             lagnavn = polygonlag["name"].tolist()
-            valgt_lag = st.selectbox("Prosjektlag", lagnavn)
+            aktuelle_lag = [navn for navn in lagnavn
+                            if normaliser(navn) not in ["kommune", "kommuner", "kommunegrense"]]
+            if len(aktuelle_lag) == 1:
+                valgt_lag = aktuelle_lag[0]
+            elif len(lagnavn) == 1:
+                valgt_lag = lagnavn[0]
+            else:
+                valgt_lag = st.selectbox("Velg området som skal beregnes", aktuelle_lag or lagnavn)
             prosjekt = les(prosjektfil, valgt_lag)
             egenskaper = [c for c in prosjekt.columns if c != prosjekt.geometry.name
                           and normaliser(c) not in ["gmlid", "fid"]]
             standardfelt = [c for c in egenskaper if normaliser(c) in
                            ["fkbstandard", "informasjon", "punkttetthet", "laserpunkt", "laserunkttetthet"]]
-            felt = st.multiselect("Egenskaper som skal fordeles i egne arealkolonner", egenskaper, default=standardfelt)
-            st.caption("Velg for eksempel FKBSTANDARD, INFORMASJON eller feltet for laserpunkttetthet. Hver verdi får sin egen kolonne.")
-            with st.expander("Se egenskapene i prosjektfilen"):
-                st.dataframe(prosjekt[egenskaper], hide_index=True)
+            felt = standardfelt
             kommuner, kraft = les_bakgrunn()
             prosjektklar = klargjor(prosjekt, PROSJEKT_CRS)
             if prosjektklar.empty:
@@ -527,9 +531,6 @@ if opplastet is not None:
             aktuelle = kommuner[kommuner.intersects(prosjektklar.geometry.union_all())]
             fylketabell = aktuelle[["Kommunenummer", "Kommune"]].sort_values("Kommune").reset_index(drop=True)
             fylketabell["Fylkeskommune"] = fylketabell["Kommunenummer"].str[:2].map(FYLKER).fillna("Ikke angitt")
-            with st.expander("Kontroller fylkeskommune per kommune"):
-                st.caption("Fylkestilhørighet fra kommunenummer. Kolonnene viser geografisk areal, ikke avtalt kostnadsandel.")
-                fylketabell = st.data_editor(fylketabell, disabled=["Kommunenummer", "Kommune"], hide_index=True)
             minste_areal = st.number_input("Minste areal som skal vises (km²)", min_value=0.0, value=0.000005, step=0.000001, format="%.6f")
             if st.button("Beregn fordeling", type="primary"):
                 with st.spinner("Beregner …"):
@@ -557,11 +558,7 @@ if opplastet is not None:
                 else:
                     st.subheader("Areal og prosentfordeling per kommune")
                     st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.3f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
-                    st.caption("SUM gjelder de viste radene. Kategorier fra ulike felt kan dekke samme areal og skal ikke summeres på tvers av kolonner. 0,000 kan være et lite positivt areal; Excel inneholder full presisjon.")
-                    st.caption("Bane NOR, Nye Veier og e-verk vises som prosent av hele prosjektarealet i kommunen. Områdene kan overlappe, så prosentene kan samlet overstige 100 %. SUM viser arealvektet prosent for de viste kommunene.")
                     detalj = detalj[["Kommunenummer", "Kommune", "Nettselskap", "Andel %"]]
-                    with st.expander("Kraftfordeling med prosentandeler"):
-                        st.dataframe(detalj, hide_index=True)
                     excel = BytesIO()
                     with pd.ExcelWriter(excel, engine="openpyxl") as writer:
                         oversikt.to_excel(writer, sheet_name="Arealfordeling", index=False)
@@ -578,3 +575,4 @@ if opplastet is not None:
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
 st.caption("Arealer beregnes fra geometrien i UTM 32. Bakgrunnsfiler oppdateres ikke automatisk.")
+
