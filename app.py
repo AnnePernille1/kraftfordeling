@@ -477,7 +477,7 @@ def nyeveier_andeler(prosjekt, kommuner, veilinjer):
         raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
     veilinjer = veilinjer.loc[gyldige].copy()
     # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
-    veilinjer.geometry = veilinjer.geometry.buffer(250)
+    veilinjer.geometry = veilinjer.geometry.buffer(100)
     return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
         columns={"Bane NOR %": "Nye Veier %"}
     )
@@ -548,10 +548,16 @@ if opplastet is not None:
             fylketabell = aktuelle[["Kommunenummer", "Kommune"]].sort_values("Kommune").reset_index(drop=True)
             fylketabell["Fylkeskommune"] = fylketabell["Kommunenummer"].str[:2].map(FYLKER).fillna("Ikke angitt")
             minste_areal = st.number_input("Minste areal som skal vises (km²)", min_value=0.0, value=0.000005, step=0.000001, format="%.6f")
+            minste_nettandel = st.number_input(
+                "Minste andel per e-verk (%)",
+                min_value=0.0, max_value=100.0, value=0.0, step=0.5,
+                help="E-verk med lavere andel av prosjektarealet i kommunen utelates. De øvrige prosentandelene endres ikke. Gjelder ikke Bane NOR eller Nye Veier.",
+            )
             if st.button("Beregn fordeling", type="primary"):
                 with st.spinner("Beregner …"):
                     oversikt = arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal)
                     detalj, advarsler = beregn_kraft(prosjekt, kommuner, kraft, minste_areal)
+                    detalj = detalj.loc[detalj["Andel %"] >= minste_nettandel].copy()
                     if not detalj.empty:
                         nett = detalj.pivot_table(index="Kommunenummer", columns="Nettselskap", values="Andel %", aggfunc="sum", fill_value=0)
                         nett.columns = [f"Nett: {c} %" for c in nett.columns]
@@ -591,5 +597,6 @@ if opplastet is not None:
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
 st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet. Bakgrunnsfiler oppdateres ikke automatisk.")
+
 
 
