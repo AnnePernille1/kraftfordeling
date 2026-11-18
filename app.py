@@ -447,6 +447,9 @@ def med_sum(tabell):
     for c in tabell:
         if c.endswith(" %"):
             summer[c] = (tabell[c] * vekter).sum() / vekter.sum() if vekter.sum() else 0.0
+        elif c.endswith(" – tilstedeværelse"):
+            antall_ja = tabell[c].eq("Ja").sum()
+            summer[c] = f"{antall_ja}/{len(tabell)}"
     summer["Kommune"] = "SUM"
     return pd.concat([tabell, pd.DataFrame([summer])], ignore_index=True)
 
@@ -574,7 +577,7 @@ if opplastet is not None:
                     st.info("Ingen kommuner oppfyller arealgrensen.")
                 else:
                     st.subheader("Arealfordeling og tilstedeværelse per kommune")
-                    st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.3f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
+                    st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.2f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
                     detalj = detalj[["Kommunenummer", "Kommune", "Nettselskap", "Andel %"]]
                     excel = BytesIO()
                     with pd.ExcelWriter(excel, engine="openpyxl") as writer:
@@ -587,11 +590,10 @@ if opplastet is not None:
                                 ark.column_dimensions[kol[0].column_letter].width = min(45, max(14, len(str(kol[0].value)) + 2))
                                 for celle in kol[1:]:
                                     if isinstance(celle.value, (float, int)):
-                                        celle.number_format = '0.00" %"' if str(kol[0].value).endswith(" %") else "0.000000"
+                                        celle.number_format = '0.00" %"' if str(kol[0].value).endswith(" %") else "0.00"
                     st.download_button("Last ned Excel", data=excel.getvalue(), file_name="arealfordeling.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore")
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
 st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet. Bakgrunnsfiler oppdateres ikke automatisk.")
-
 
 
