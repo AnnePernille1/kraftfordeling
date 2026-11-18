@@ -3,6 +3,12 @@
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from io import BytesIO
+from datetime import datetime
+import json
+from urllib.error import URLError
+from urllib.parse import urlencode
+from urllib.request import urlopen
+from zoneinfo import ZoneInfo
 
 import geopandas as gpd
 import pandas as pd
@@ -23,6 +29,7 @@ DATAMAPPE = Path(__file__).resolve().parent
 PROSJEKT_CRS = "EPSG:25833"
 KOMMUNE_CRS = "EPSG:25833"
 KRAFT_CRS = "EPSG:25832"
+NVE_KRAFT_URL = "https://kart.nve.no/enterprise/rest/services/Nettomraader/MapServer/3/query"
 
 
 # ── HJELPEFUNKSJONER ──────────────────────────────────────────
@@ -113,13 +120,10 @@ def les(fil, lag=None):
 
 
 @st.cache_data
-def les_bakgrunn(beregnings_crs):
+def les_kommuner(beregnings_crs):
     kommunefil = DATAMAPPE / "Kommuner.gml"
-    kraftfil = DATAMAPPE / "NettKonsesjonsomrade.shp"
-
-    for fil in [kommunefil, kraftfil]:
-        if not fil.is_file():
-            raise FileNotFoundError(f"Fant ikke {fil}")
+    if not kommunefil.is_file():
+        raise FileNotFoundError(f"Fant ikke {kommunefil}")
 
     lag = gpd.list_layers(kommunefil)
 
@@ -209,13 +213,47 @@ def les_bakgrunn(beregnings_crs):
         as_index=False,
     )
 
-    kraft = klargjor(
-        les(kraftfil),
-        KRAFT_CRS,
-        beregnings_crs,
-    )
+    return kommuner
 
-    eierfelt = finn_felt(kraft, ["eierNavn"])
+
+def hent_nve_kraft(prosjekt):
+    # Send bare prosjektets omsluttende rektangel til karttjenesten.
+    parametere = {
+        "where": "1=1",
+        "geometry": ",".join(map(str, prosjekt.total_bounds)),
+        "geometryType": "esriGeometryEnvelope",
+        "inSR": prosjekt.crs.to_epsg(),
+        "spatialRel": "esriSpatialRelIntersects",
+        "outFields": "NAVN",
+        "returnGeometry": "true",
+        "outSR": 4326,
+        "f": "geojson",
+    }
+    with urlopen(f"{NVE_KRAFT_URL}?{urlencode(parametere)}", timeout=15) as respons:
+        data = json.load(respons)
+    if data.get("type") != "FeatureCollection" or not isinstance(data.get("features"), list):
+        raise ValueError("NVE returnerte ikke en gyldig GeoJSON-samling.")
+    if data.get("exceededTransferLimit") or len(data["features"]) >= 2000:
+        raise ValueError("NVE returnerte et ufullstendig uttrekk.")
+    if not data["features"]:
+        return gpd.GeoDataFrame(
+            columns=["Nettselskap", "geometry"], geometry="geometry", crs=prosjekt.crs
+        )
+    kraft = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
+    return klargjor_kraft(kraft, "EPSG:4326", prosjekt.crs, "NAVN")
+
+
+@st.cache_data
+def les_lokal_kraft(beregnings_crs):
+    kraftfil = DATAMAPPE / "NettKonsesjonsomrade.shp"
+    if not kraftfil.is_file():
+        raise FileNotFoundError(f"Fant ikke reservefilen {kraftfil.name}.")
+    return klargjor_kraft(les(kraftfil), KRAFT_CRS, beregnings_crs, "eierNavn")
+
+
+def klargjor_kraft(kraft, standard_crs, beregnings_crs, eierfeltnavn):
+    kraft = klargjor(kraft, standard_crs, beregnings_crs)
+    eierfelt = finn_felt(kraft, [eierfeltnavn])
 
     kraft["Nettselskap"] = (
         kraft[eierfelt]
@@ -232,7 +270,7 @@ def les_bakgrunn(beregnings_crs):
         as_index=False,
     )
 
-    return kommuner, kraft
+    return kraft
 
 
 def beregn_kraft(prosjekt, kommuner, kraft, minste_areal):
@@ -530,7 +568,7 @@ if opplastet is not None:
                            ["fkbstandard", "informasjon", "punkttetthet", "laserpunkt", "laserunkttetthet"]]
             felt = standardfelt
             beregnings_crs = velg_utm(prosjekt)
-            kommuner, kraft = les_bakgrunn(beregnings_crs)
+            kommuner = les_kommuner(beregnings_crs)
             prosjektklar = klargjor(prosjekt, PROSJEKT_CRS, beregnings_crs)
             if prosjektklar.empty:
                 raise ValueError("Prosjektlaget inneholder ingen polygonarealer.")
@@ -546,6 +584,20 @@ if opplastet is not None:
             if st.button("Beregn fordeling", type="primary"):
                 with st.spinner("Beregner …"):
                     oversikt = arealtabell(prosjekt, kommuner, felt, fylketabell, minste_areal)
+                    reservemelding = None
+                    try:
+                        kraft = hent_nve_kraft(prosjektklar)
+                        hentet = datetime.now(ZoneInfo("Europe/Oslo")).strftime("%d.%m.%Y kl. %H:%M")
+                        kraftkilde = f"NVE karttjeneste, hentet {hentet}"
+                    except (URLError, OSError, ValueError) as feil:
+                        reservemelding = f"Kunne ikke hente konsesjonsområder fra NVE ({feil})."
+                        try:
+                            kraft = les_lokal_kraft(beregnings_crs)
+                        except Exception as reservefeil:
+                            raise ValueError(
+                                f"{reservemelding} Kunne heller ikke lese den lokale reservefilen: {reservefeil}"
+                            ) from reservefeil
+                        kraftkilde = "Lokal reservefil: NettKonsesjonsomrade.shp"
                     detalj, advarsler = beregn_kraft(prosjekt, kommuner, kraft, minste_areal)
                     detalj = detalj.loc[detalj["Andel %"] >= minste_nettandel].copy()
                     if not detalj.empty:
@@ -571,6 +623,9 @@ if opplastet is not None:
                         oversikt = oversikt.merge(vei, on="Kommunenummer", how="left")
                         oversikt[kolonne] = oversikt[kolonne].fillna("Nei")
                     oversikt = med_sum(oversikt)
+                if reservemelding:
+                    st.warning(reservemelding)
+                st.caption(f"Kilde for konsesjonsområder: {kraftkilde}")
                 for melding in advarsler:
                     st.warning(melding)
                 if oversikt.empty:
@@ -583,6 +638,9 @@ if opplastet is not None:
                     with pd.ExcelWriter(excel, engine="openpyxl") as writer:
                         oversikt.to_excel(writer, sheet_name="Arealfordeling", index=False)
                         detalj.to_excel(writer, sheet_name="Kraftfordeling", index=False)
+                        pd.DataFrame({"Kilde for konsesjonsområder": [kraftkilde]}).to_excel(
+                            writer, sheet_name="Datagrunnlag", index=False
+                        )
                         for ark in writer.sheets.values():
                             ark.freeze_panes = "C2"
                             ark.auto_filter.ref = ark.dimensions
@@ -594,6 +652,7 @@ if opplastet is not None:
                     st.download_button("Last ned Excel", data=excel.getvalue(), file_name="arealfordeling.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore")
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
-st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet. Bakgrunnsfiler oppdateres ikke automatisk.")
+st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet.")
+
 
 
