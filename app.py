@@ -30,6 +30,10 @@ PROSJEKT_CRS = "EPSG:25833"
 KOMMUNE_CRS = "EPSG:25833"
 KRAFT_CRS = "EPSG:25832"
 NVE_KRAFT_URL = "https://kart.nve.no/enterprise/rest/services/Nettomraader/MapServer/3/query"
+NYE_VEIER_URL = (
+    "https://services-eu1.arcgis.com/Zxn04POL7OfqZkir/arcgis/rest/services/"
+    "NV_SenterlinjePortefolje_Niv0/FeatureServer/0/query"
+)
 
 
 # ── HJELPEFUNKSJONER ──────────────────────────────────────────
@@ -216,6 +220,30 @@ def les_kommuner(beregnings_crs):
     return kommuner
 
 
+def hent_geojson(url, parametere):
+    with urlopen(f"{url}?{urlencode(parametere)}", timeout=15) as respons:
+        data = json.load(respons)
+    if data.get("type") != "FeatureCollection" or not isinstance(data.get("features"), list):
+        raise ValueError("Karttjenesten returnerte ikke en gyldig GeoJSON-samling.")
+    if data.get("exceededTransferLimit") or data.get("properties", {}).get("exceededTransferLimit"):
+        raise ValueError("Karttjenesten returnerte et ufullstendig uttrekk.")
+    return data["features"]
+
+
+def hent_nye_veier(beregnings_crs):
+    objekter = hent_geojson(NYE_VEIER_URL, {
+        "where": "1=1",
+        "outFields": "parsell",
+        "returnGeometry": "true",
+        "outSR": 4326,
+        "f": "geojson",
+    })
+    if not objekter or any(not objekt.get("geometry") for objekt in objekter):
+        raise ValueError("Nye Veier returnerte manglende veigeometrier.")
+    veilinjer = gpd.GeoDataFrame.from_features(objekter, crs="EPSG:4326")
+    return klargjor_veilinjer(veilinjer, beregnings_crs)
+
+
 def hent_nve_kraft(prosjekt):
     # Send bare prosjektets omsluttende rektangel til karttjenesten.
     parametere = {
@@ -229,17 +257,14 @@ def hent_nve_kraft(prosjekt):
         "outSR": 4326,
         "f": "geojson",
     }
-    with urlopen(f"{NVE_KRAFT_URL}?{urlencode(parametere)}", timeout=15) as respons:
-        data = json.load(respons)
-    if data.get("type") != "FeatureCollection" or not isinstance(data.get("features"), list):
-        raise ValueError("NVE returnerte ikke en gyldig GeoJSON-samling.")
-    if data.get("exceededTransferLimit") or len(data["features"]) >= 2000:
+    objekter = hent_geojson(NVE_KRAFT_URL, parametere)
+    if len(objekter) >= 2000:
         raise ValueError("NVE returnerte et ufullstendig uttrekk.")
-    if not data["features"]:
+    if not objekter:
         return gpd.GeoDataFrame(
             columns=["Nettselskap", "geometry"], geometry="geometry", crs=prosjekt.crs
         )
-    kraft = gpd.GeoDataFrame.from_features(data["features"], crs="EPSG:4326")
+    kraft = gpd.GeoDataFrame.from_features(objekter, crs="EPSG:4326")
     return klargjor_kraft(kraft, "EPSG:4326", prosjekt.crs, "NAVN")
 
 
@@ -512,6 +537,7 @@ def klargjor_veilinjer(veilinjer, beregnings_crs):
 
 
 # ── NETTSIDEN ─────────────────────────────────────────────────
+datakilder = []
 st.title("Areal- og kraftfordeling")
 st.write("Beregn areal per kommune, egenskapskategori, fylkeskommune og nettselskap.")
 banefil = DATAMAPPE / "forenklet, bufret.gml"
@@ -528,18 +554,12 @@ else:
     else:
         st.info("Last opp den ferdige bufferfilen for å sjekke tilstedeværelse for Bane NOR.")
 veifil = DATAMAPPE / "NyeVeier_strekninger.geojson"
-veilinjer = None
-if veifil.is_file():
-    veilinjer = les(veifil)
-else:
-    veiopplastet = st.file_uploader("Nye Veier – veilinjer uten buffer", type=["geojson", "gml", "gpkg"])
-    if veiopplastet is not None:
-        with TemporaryDirectory() as veitemp:
-            lokal_vei = Path(veitemp) / Path(veiopplastet.name).name
-            lokal_vei.write_bytes(veiopplastet.getvalue())
-            veilinjer = les(lokal_vei)
-    else:
-        st.info("Last opp veilinjer for å sjekke tilstedeværelse for Nye Veier.")
+veiopplastet = None
+if not veifil.is_file():
+    veiopplastet = st.file_uploader(
+        "Nye Veier – valgfri reservefil med veilinjer",
+        type=["geojson", "gml", "gpkg"],
+    )
 st.caption("Tilstedeværelse sjekkes mot den ferdige jernbanebufferen og veilinjer uten buffer.")
 opplastet = st.file_uploader("Velg prosjektområde", type=["gml", "gpkg", "geojson"])
 if opplastet is not None:
@@ -588,7 +608,7 @@ if opplastet is not None:
                     try:
                         kraft = hent_nve_kraft(prosjektklar)
                         hentet = datetime.now(ZoneInfo("Europe/Oslo")).strftime("%d.%m.%Y kl. %H:%M")
-                        kraftkilde = f"NVE karttjeneste, hentet {hentet}"
+                        kraftkilde = f"Fra nett, hentet {hentet}"
                     except (URLError, OSError, ValueError) as feil:
                         reservemelding = f"Kunne ikke hente konsesjonsområder fra NVE ({feil})."
                         try:
@@ -614,8 +634,32 @@ if opplastet is not None:
                         )
                         oversikt = oversikt.merge(bane, on="Kommunenummer", how="left")
                         oversikt[kolonne] = oversikt[kolonne].fillna("Nei")
-                    if veilinjer is not None:
-                        veiklar = klargjor_veilinjer(veilinjer, kommuner.crs)
+                    veivarsel = None
+                    try:
+                        veiklar = hent_nye_veier(kommuner.crs)
+                        hentet = datetime.now(ZoneInfo("Europe/Oslo")).strftime("%d.%m.%Y kl. %H:%M")
+                        veikilde = f"Fra nett, hentet {hentet}"
+                    except (OSError, ValueError) as feil:
+                        veivarsel = f"Kunne ikke hente veilinjer fra Nye Veier ({feil})."
+                        veiklar = None
+                        veikilde = "Utilgjengelig"
+                        if veifil.is_file() or veiopplastet is not None:
+                            try:
+                                if veifil.is_file():
+                                    veilinjer = les(veifil)
+                                    reservenavn = veifil.name
+                                else:
+                                    reservenavn = Path(veiopplastet.name).name
+                                    lokal_vei = Path(tempmappe) / "nye_veier_reserve"
+                                    lokal_vei.mkdir()
+                                    reservefil = lokal_vei / reservenavn
+                                    reservefil.write_bytes(veiopplastet.getvalue())
+                                    veilinjer = les(reservefil)
+                                veiklar = klargjor_veilinjer(veilinjer, kommuner.crs)
+                                veikilde = f"Reservefil: {reservenavn}"
+                            except Exception as reservefeil:
+                                veivarsel += f" Kunne heller ikke lese reservefilen ({reservefeil})."
+                    if veiklar is not None:
                         kolonne = "Nye Veier – tilstedeværelse"
                         vei = tilstedevaerelse(
                             prosjektklar, kommuner, veiklar.geometry.union_all(), kolonne
@@ -625,7 +669,9 @@ if opplastet is not None:
                     oversikt = med_sum(oversikt)
                 if reservemelding:
                     st.warning(reservemelding)
-                st.caption(f"Kilde for konsesjonsområder: {kraftkilde}")
+                if veivarsel:
+                    st.warning(veivarsel)
+                datakilder = [f"NVE: {kraftkilde}", f"Nye Veier: {veikilde}"]
                 for melding in advarsler:
                     st.warning(melding)
                 if oversikt.empty:
@@ -638,7 +684,10 @@ if opplastet is not None:
                     with pd.ExcelWriter(excel, engine="openpyxl") as writer:
                         oversikt.to_excel(writer, sheet_name="Arealfordeling", index=False)
                         detalj.to_excel(writer, sheet_name="Kraftfordeling", index=False)
-                        pd.DataFrame({"Kilde for konsesjonsområder": [kraftkilde]}).to_excel(
+                        pd.DataFrame({
+                            "Kilde for konsesjonsområder": [kraftkilde],
+                            "Kilde for Nye Veier": [veikilde],
+                        }).to_excel(
                             writer, sheet_name="Datagrunnlag", index=False
                         )
                         for ark in writer.sheets.values():
@@ -652,7 +701,12 @@ if opplastet is not None:
                     st.download_button("Last ned Excel", data=excel.getvalue(), file_name="arealfordeling.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", on_click="ignore")
     except Exception as feil:
         st.error(f"{type(feil).__name__}: {feil}")
-st.caption("Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet.")
+st.caption("  \n".join([
+    "Arealer beregnes i UTM-sonen som velges automatisk fra prosjektområdet.",
+    *datakilder,
+]))
+
+
 
 
 
