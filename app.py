@@ -451,36 +451,23 @@ def med_sum(tabell):
     return pd.concat([tabell, pd.DataFrame([summer])], ignore_index=True)
 
 
-def banenor_andeler(prosjekt, kommuner, buffer):
-    # Bufferfilen er allerede bufret. Ikke legg på ytterligere 100 meter.
-    prosjekt = klargjor(prosjekt, PROSJEKT_CRS, kommuner.crs)
-    buffer = klargjor(buffer, "EPSG:25833", kommuner.crs)
+def tilstedevaerelse(prosjekt, kommuner, geometri, kolonne):
     samlet = prosjekt.geometry.union_all()
     utsnitt = kommuner[kommuner.intersects(samlet)].copy()
     utsnitt.geometry = utsnitt.geometry.intersection(samlet)
     utsnitt = utsnitt[utsnitt.geometry.area > 0].copy()
-    banegeom = buffer.geometry.union_all()
-    utsnitt["Bane NOR %"] = 100 * utsnitt.geometry.intersection(banegeom).area / utsnitt.geometry.area
-    return utsnitt[["Kommunenummer", "Bane NOR %"]]
+    utsnitt[kolonne] = utsnitt.intersects(geometri).map({True: "Ja", False: "Nei"})
+    return utsnitt[["Kommunenummer", kolonne]]
 
 
-def nyeveier_andeler(prosjekt, kommuner, veilinjer):
-    # Nye Veier-filen inneholder linjer uten buffer.
-    veilinjer = veilinjer.copy()
+def klargjor_veilinjer(veilinjer, beregnings_crs):
     if veilinjer.crs is None:
         veilinjer = veilinjer.set_crs("EPSG:25833")
-    veilinjer = veilinjer.to_crs(kommuner.crs)
     gyldige = veilinjer.geometry.notna() & ~veilinjer.geometry.is_empty
-    if not veilinjer.loc[gyldige].geometry.geom_type.isin(
-        ["LineString", "MultiLineString"]
-    ).all():
-        raise ValueError("Nye Veier må være et linjelag uten buffer. Bane NOR skal være et ferdig bufferpolygon.")
-    veilinjer = veilinjer.loc[gyldige].copy()
-    # Buffer i meter etter reprojisering. Overlapp slås sammen i banenor_andeler.
-    veilinjer.geometry = veilinjer.geometry.buffer(100)
-    return banenor_andeler(prosjekt, kommuner, veilinjer).rename(
-        columns={"Bane NOR %": "Nye Veier %"}
-    )
+    veilinjer = veilinjer.loc[gyldige]
+    if not veilinjer.geometry.geom_type.isin(["LineString", "MultiLineString"]).all():
+        raise ValueError("Nye Veier må være et linjelag.")
+    return veilinjer.to_crs(beregnings_crs)
 
 
 # ── NETTSIDEN ─────────────────────────────────────────────────
@@ -498,7 +485,7 @@ else:
             lokal_bane.write_bytes(baneopplastet.getvalue())
             banebuffer = les(lokal_bane)
     else:
-        st.info("Last opp den ferdige bufferfilen for å få med Bane NOR i prosentfordelingen.")
+        st.info("Last opp den ferdige bufferfilen for å sjekke tilstedeværelse for Bane NOR.")
 veifil = DATAMAPPE / "NyeVeier_strekninger.geojson"
 veilinjer = None
 if veifil.is_file():
@@ -511,8 +498,8 @@ else:
             lokal_vei.write_bytes(veiopplastet.getvalue())
             veilinjer = les(lokal_vei)
     else:
-        st.info("Last opp veilinjer for å få med Nye Veier i prosentfordelingen.")
-st.caption("Bane NOR: bruker ferdig buffer. Nye Veier: legger på 100 meter på hver side av linjene.")
+        st.info("Last opp veilinjer for å sjekke tilstedeværelse for Nye Veier.")
+st.caption("Tilstedeværelse sjekkes mot den ferdige jernbanebufferen og veilinjer uten buffer.")
 opplastet = st.file_uploader("Velg prosjektområde", type=["gml", "gpkg", "geojson"])
 if opplastet is not None:
     try:
@@ -565,20 +552,28 @@ if opplastet is not None:
                         for c in nett.columns:
                             oversikt[c] = oversikt[c].fillna(0)
                     if banebuffer is not None:
-                        bane = banenor_andeler(prosjekt, kommuner, banebuffer)
+                        baneklar = klargjor(banebuffer, "EPSG:25833", kommuner.crs)
+                        kolonne = "Bane NOR – tilstedeværelse"
+                        bane = tilstedevaerelse(
+                            prosjektklar, kommuner, baneklar.geometry.union_all(), kolonne
+                        )
                         oversikt = oversikt.merge(bane, on="Kommunenummer", how="left")
-                        oversikt["Bane NOR %"] = oversikt["Bane NOR %"].fillna(0)
+                        oversikt[kolonne] = oversikt[kolonne].fillna("Nei")
                     if veilinjer is not None:
-                        vei = nyeveier_andeler(prosjekt, kommuner, veilinjer)
+                        veiklar = klargjor_veilinjer(veilinjer, kommuner.crs)
+                        kolonne = "Nye Veier – tilstedeværelse"
+                        vei = tilstedevaerelse(
+                            prosjektklar, kommuner, veiklar.geometry.union_all(), kolonne
+                        )
                         oversikt = oversikt.merge(vei, on="Kommunenummer", how="left")
-                        oversikt["Nye Veier %"] = oversikt["Nye Veier %"].fillna(0)
+                        oversikt[kolonne] = oversikt[kolonne].fillna("Nei")
                     oversikt = med_sum(oversikt)
                 for melding in advarsler:
                     st.warning(melding)
                 if oversikt.empty:
                     st.info("Ingen kommuner oppfyller arealgrensen.")
                 else:
-                    st.subheader("Areal og prosentfordeling per kommune")
+                    st.subheader("Arealfordeling og tilstedeværelse per kommune")
                     st.dataframe(oversikt.style.format({c: "{:.2f} %" if c.endswith(" %") else "{:.3f}" for c in oversikt if c.endswith((" km²", " %"))}), hide_index=True, use_container_width=True)
                     detalj = detalj[["Kommunenummer", "Kommune", "Nettselskap", "Andel %"]]
                     excel = BytesIO()
